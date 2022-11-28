@@ -1,1 +1,6 @@
 # nginx
+
+./configure
+
+make
+
