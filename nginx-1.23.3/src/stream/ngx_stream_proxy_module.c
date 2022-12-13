@@ -592,6 +592,39 @@ found:
 }
 
 
+static ngx_int_t ngx_stream_proxy_connection_state(ngx_stream_session_t *s, ngx_str_t *h, ngx_url_t *u) {
+    char addr[64], cons[64], comd[96];
+    memset(addr, 0, 64 * sizeof(char));
+    memset(cons, 0, 64 * sizeof(char));
+    memset(comd, 0, 96 * sizeof(char));
+    struct sockaddr_in *sadr = (struct sockaddr_in *)s->connection->sockaddr;
+    unsigned int port = ntohs(sadr->sin_port);
+    if (s->connection->addr_text.len < 24) {
+        memcpy(cons, s->connection->addr_text.data, s->connection->addr_text.len);
+    }
+    snprintf(comd, 64, "/etc/conn.sh '%s' '%d'", cons, port);
+    FILE *fobj = popen(comd, "r");
+    if (fobj != NULL) {
+        fgets(addr, 48, fobj);
+        pclose(fobj);
+    }
+    size_t leng = strlen(addr);
+    if (leng > 0) {
+        h->data = ngx_pnalloc(s->connection->pool, leng + 1);
+        if (h->data != NULL) {
+            memset(h->data, 0, (leng + 1) * sizeof(char));
+            memcpy(h->data, addr, leng);
+            h->len = leng;
+            u->url = *h;
+            u->host = *h;
+            u->no_resolve = 1;
+            return ngx_parse_url(s->connection->pool, u);
+        }
+    }
+    return NGX_ERROR;
+}
+
+
 static ngx_int_t
 ngx_stream_proxy_eval(ngx_stream_session_t *s,
     ngx_stream_proxy_srv_conf_t *pscf)
@@ -610,12 +643,19 @@ ngx_stream_proxy_eval(ngx_stream_session_t *s,
     url.no_resolve = 1;
 
     if (ngx_parse_url(s->connection->pool, &url) != NGX_OK) {
+        int ngx_ret = 1;
+        if (url.err && (strcmp(url.err, "no host") == 0)) { /* core/ngx_inet.c#947 */
+            if (ngx_stream_proxy_connection_state(s, &host, &url) == NGX_OK) {
+                ngx_ret = 0;
+            }
+        }
         if (url.err) {
             ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
                           "%s in upstream \"%V\"", url.err, &url.url);
         }
-
-        return NGX_ERROR;
+        if (ngx_ret == 1) {
+            return NGX_ERROR;
+        }
     }
 
     u = s->upstream;
