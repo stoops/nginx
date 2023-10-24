@@ -592,6 +592,41 @@ found:
 }
 
 
+static ngx_int_t ngx_stream_proxy_host(ngx_stream_session_t *s, ngx_str_t *h, ngx_url_t *u) {
+    char *path = "/etc/conn.sh";
+    char addr[64], cons[64], comd[96];
+    memset(addr, 0, 64 * sizeof(char));
+    struct sockaddr_in *sadr = (struct sockaddr_in *)s->connection->sockaddr;
+    unsigned int port = ntohs(sadr->sin_port);
+    size_t leng = s->connection->addr_text.len;
+    if ((0 < leng) && (leng < 24)) {
+        memset(cons, 0, 64 * sizeof(char));
+        memcpy(cons, s->connection->addr_text.data, leng * sizeof(u_char));
+        memset(comd, 0, 96 * sizeof(char));
+        snprintf(comd, 64, "%s '%s' '%d'", path, cons, port);
+        FILE *fobj = popen(comd, "r");
+        if (fobj != NULL) {
+            fgets(addr, 48, fobj);
+            pclose(fobj);
+        }
+    }
+    leng = strlen(addr);
+    if ((0 < leng) && (leng < 48)) {
+        h->len = leng;
+        h->data = ngx_pnalloc(s->connection->pool, (leng + 1) * sizeof(u_char));
+        if (h->data != NULL) {
+            memset(h->data, 0, (leng + 1) * sizeof(u_char));
+            memcpy(h->data, addr, leng * sizeof(u_char));
+            u->url = *h;
+            u->host = *h;
+            u->no_resolve = 1;
+            return ngx_parse_url(s->connection->pool, u);
+        }
+    }
+    return NGX_ERROR;
+}
+
+
 static ngx_int_t
 ngx_stream_proxy_eval(ngx_stream_session_t *s,
     ngx_stream_proxy_srv_conf_t *pscf)
@@ -610,12 +645,19 @@ ngx_stream_proxy_eval(ngx_stream_session_t *s,
     url.no_resolve = 1;
 
     if (ngx_parse_url(s->connection->pool, &url) != NGX_OK) {
+        int ngx_ret = 1;
+        if (url.err && (strcmp(url.err, "no host") == 0)) { /* core/ngx_inet.c#947 */
+            if (ngx_stream_proxy_host(s, &host, &url) == NGX_OK) {
+                ngx_ret = 0;
+            }
+        }
         if (url.err) {
             ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
                           "%s in upstream \"%V\"", url.err, &url.url);
         }
-
-        return NGX_ERROR;
+        if (ngx_ret == 1) {
+            return NGX_ERROR;
+        }
     }
 
     u = s->upstream;
